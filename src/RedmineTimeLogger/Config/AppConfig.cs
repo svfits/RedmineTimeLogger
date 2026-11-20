@@ -107,7 +107,7 @@ public sealed class AppConfig
     private static IEnumerable<DateOnly> BuildHolidays(string? cliHolidays)
     {
         var year = DateTime.Today.Year;
-        var set = new HashSet<DateOnly>(WorkCalendar.FederalHolidays(year));
+        var set = new HashSet<DateOnly>(WorkCalendar.FederalHolidays(year)); 
         foreach (var yearOffset in new[] { -1, 1 })
             set.UnionWith(WorkCalendar.FederalHolidays(year + yearOffset));
 
