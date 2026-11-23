@@ -1,27 +1,41 @@
 namespace RedmineTimeLogger.Domain;
 
 /// <summary>
-/// Производственный календарь: выходные — суббота/воскресенье, праздники — из набора.
+/// Производственный календарь: выходные — суббота/воскресенье, праздники — из набора,
+/// отпуск — периоды, которые не входят в норму рабочего времени.
 /// Переносы выходных по постановлениям правительства здесь не учитываются;
 /// их можно передать явно (см. AppConfig.Holidays).
 /// </summary>
 public sealed class WorkCalendar
 {
     private readonly HashSet<DateOnly> _holidays;
+    private readonly HashSet<DateOnly> _vacationDays;
+    private readonly List<VacationPeriod> _vacations;
 
-    public WorkCalendar(IEnumerable<DateOnly> holidays)
+    public WorkCalendar(IEnumerable<DateOnly> holidays, IEnumerable<VacationPeriod>? vacations = null)
     {
         _holidays = holidays.Distinct().ToHashSet();
+        _vacations = (vacations ?? Enumerable.Empty<VacationPeriod>())
+            .OrderBy(p => p.From)
+            .ToList();
+        _vacationDays = _vacations
+            .SelectMany(p => Enumerable.Range(0, p.Days).Select(i => p.From.AddDays(i)))
+            .ToHashSet();
     }
 
     public IReadOnlyCollection<DateOnly> Holidays => _holidays;
+
+    public IReadOnlyList<VacationPeriod> Vacations => _vacations;
 
     public bool IsWeekend(DateOnly date) =>
         date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
 
     public bool IsHoliday(DateOnly date) => _holidays.Contains(date);
 
-    public bool IsWorkday(DateOnly date) => !IsWeekend(date) && !IsHoliday(date);
+    /// <summary>День отпуска: норма за него не начисляется.</summary>
+    public bool IsVacation(DateOnly date) => _vacationDays.Contains(date);
+
+    public bool IsWorkday(DateOnly date) => !IsWeekend(date) && !IsHoliday(date) && !IsVacation(date);
 
     /// <summary>Государственные праздники РФ с фиксированной датой (без переносов).</summary>
     public static IEnumerable<DateOnly> FederalHolidays(int year)

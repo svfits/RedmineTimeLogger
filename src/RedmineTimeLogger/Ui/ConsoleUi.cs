@@ -44,9 +44,22 @@ public static class ConsoleUi
     {
         Title($"Трудозатраты: {report.Label} (по {FormatDate(report.Anchor)})");
 
-        KeyValue("Будни месяца", $"{report.WeekdayCount} дн. × {Fmt(report.HoursPerDay)} ч = {Fmt(report.NormByWeekdays)} ч");
+        var hours = Fmt(report.HoursPerDay);
+
+        if (report.VacationDayCount > 0)
+        {
+            KeyValue("Будни месяца", $"{report.WeekdayCount} дн. × {hours} ч = {Fmt(report.WeekdayCount * report.HoursPerDay)} ч");
+            KeyValue("Отпуск", $"{report.VacationDayCount} дн. ({FormatRuns(report.VacationRuns)}) → не учитывается");
+            KeyValue("Норма по будням", $"{report.NormWeekdayCount} дн. × {hours} ч = {Fmt(report.NormByWeekdays)} ч");
+        }
+        else
+        {
+            KeyValue("Будни месяца", $"{report.WeekdayCount} дн. × {hours} ч = {Fmt(report.NormByWeekdays)} ч");
+        }
+
         if (report.HolidayCountOnWeekdays > 0)
-            KeyValue("Праздники в будни", $"{report.HolidayCountOnWeekdays} дн. → норма с праздниками {report.WorkdayCount} дн. × {Fmt(report.HoursPerDay)} ч = {Fmt(report.NormByHolidays)} ч");
+            KeyValue("Праздники в будни", $"{report.HolidayCountOnWeekdays} дн. → норма с праздниками {report.WorkdayCount} дн. × {hours} ч = {Fmt(report.NormByHolidays)} ч");
+
         KeyValue("Списано", $"{Fmt(report.Logged)} ч");
 
         var gapWeekdays = report.GapByWeekdays;
@@ -75,7 +88,7 @@ public static class ConsoleUi
 
     private static void PrintDays(MonthReport report)
     {
-        Muted("Календарь: «=» — часы списаны, «·» — рабочий день без записи, «п» — праздник.");
+        Muted("Календарь: «=» — часы списаны, «·» — рабочий день без записи, «п» — праздник, «о» — отпуск.");
 
         var byDate = report.Days.ToDictionary(d => d.Date);
         var first = report.Days[0].Date;
@@ -102,9 +115,16 @@ public static class ConsoleUi
     {
         if (day.IsWeekend) return $"{day.Date.Day,2}      ";
         if (day.IsHoliday) return $"{day.Date.Day,2}    п ";
+        if (day.IsVacation) return $"{day.Date.Day,2}    о ";
         if (day.Hours > 0) return $"{day.Date.Day,2} {Fmt(day.Hours),3}= ";
         return $"{day.Date.Day,2}    · ";
     }
+
+    /// <summary>«02.11–06.11, 10.11» — без года, месяц и так известен.</summary>
+    public static string FormatRuns(IReadOnlyList<(DateOnly From, DateOnly To)> runs) =>
+        string.Join(", ", runs.Select(r => r.From == r.To
+            ? r.From.ToString("dd.MM")
+            : $"{r.From.ToString("dd.MM")}–{r.To.ToString("dd.MM")}"));
 
     private static void PrintEntries(MonthReport report)
     {
@@ -196,7 +216,6 @@ public static class ConsoleUi
         if (string.IsNullOrWhiteSpace(input)) return defaultValue;
         return Normalize(input);
     }
-
     public static bool AskYesNo(string prompt, bool defaultValue = false)
     {
         var hint = defaultValue ? "[Д/н]" : "[д/Н]";

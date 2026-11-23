@@ -28,6 +28,11 @@ internal static class Program
             ConsoleUi.Error(ex.Message);
             return 2;
         }
+        catch (VacationFormatException ex)
+        {
+            ConsoleUi.Error(ex.Message);
+            return 2;
+        }
         catch (ConfigException ex)
         {
             ConsoleUi.Error(ex.Message);
@@ -62,7 +67,42 @@ internal static class Program
             return 0;
         }
 
-        var config = AppConfig.Load(cli);
+        var vacations = VacationStore.Load();
+
+        if (cli.ClearVacations)
+        {
+            vacations.Clear();
+            vacations.Save();
+            ConsoleUi.Success($"Отпуска очищены: {vacations.FilePath}");
+            return 0;
+        }
+
+        if (cli.ShowVacations)
+        {
+            PrintVacations(vacations);
+            return 0;
+        }
+
+        if (cli.HasVacation)
+        {
+            var added = vacations.Add(cli.ParseVacations());
+            vacations.Save();
+
+            ConsoleUi.Success($"Отпуск сохранён: {vacations.FilePath}");
+            foreach (var period in vacations.Periods)
+                ConsoleUi.Info($"  • {period.ToDisplay()} ({period.Days} дн.)");
+            ConsoleUi.Muted(added > 0
+                ? $"  Добавлено дней: {added}. Эти дни не входят в норму рабочего времени."
+                : "  Новых дней не добавилось — такой отпуск уже был учтён.");
+
+            if (!cli.ReportOnly && !cli.HasIssue && !cli.Check)
+            {
+                ConsoleUi.Muted("  Запустите без --vacation, чтобы увидеть отчёт с учётом отпуска.");
+                return 0;
+            }
+        }
+
+        var config = AppConfig.Load(cli, vacations);
         using var client = new RedmineClient(config.BaseUrl, config.ApiKey, config.IgnoreCertificateErrors);
 
         ConsoleUi.Title("Redmine: списание времени");
@@ -70,6 +110,11 @@ internal static class Program
         ConsoleUi.KeyValue("Redmine", config.BaseUrl);
         ConsoleUi.KeyValue("Пользователь", $"{me.DisplayName} ({me.Login}, id {me.Id})");
         ConsoleUi.KeyValue("API-ключ", $"из {config.ApiKeySource}");
+        if (config.Vacations.Count > 0)
+        {
+            var days = VacationStore.ExpandDays(config.Vacations).Count();
+            ConsoleUi.KeyValue("Отпуск", $"{days} календ. дн.: {string.Join(", ", config.Vacations.Select(p => p.ToDisplay()))}");
+        }
 
         if (cli.Check)
         {
@@ -88,11 +133,16 @@ internal static class Program
 
         if (cli.ReportOnly) return 0;
 
+        var interactive = !cli.HasIssue;
+        if (interactive)
+        {
+            report = AskVacation(report, config, vacations, month, today, entries);
+        }
+
         var issues = await client.GetOpenAssignedIssuesAsync(me.Id);
         var candidates = Candidates.Filter(issues);
         ConsoleUi.PrintCandidates(candidates);
 
-        var interactive = !cli.HasIssue;
         var issue = await ResolveIssueAsync(client, candidates, cli, interactive);
 
         var activities = await client.GetActivitiesAsync();
@@ -153,8 +203,103 @@ internal static class Program
         return 0;
     }
 
-    private static async Task<Issue> ResolveIssueAsync(
-        RedmineClient client,
+    /// <summary>Сколько несписанных рабочих дней считаем поводом спросить про отпуск.</summary>
+    private const int VacationPromptMinMissingDays = 3;
+
+    /// <summary>
+    /// Если незаполненных рабочих дней больше трёх, спрашивает про отпуск:
+    /// указанные периоды сохраняются и пересчитывают норму.
+    /// </summary>
+    private static MonthReport AskVacation(
+        MonthReport report,
+        AppConfig config,
+        VacationStore store,
+        DateOnly month,
+        DateOnly today,
+        IReadOnlyList<TimeEntry> entries)
+    {
+        var current = report;
+        var missing = current.MissingWorkdays;
+        if (missing.Count <= VacationPromptMinMissingDays) return current;
+
+        ConsoleUi.Title("Отпуск");
+        ConsoleUi.Info($"  Незаполненных рабочих дней: {missing.Count} ({ConsoleUi.Fmt(missing.Count * config.HoursPerDay)} ч) — больше {VacationPromptMinMissingDays}.");
+        ConsoleUi.Muted("  Если часть этих дней была отпуском, укажите периоды — они выйдут из нормы.");
+        ConsoleUi.Muted($"  Например: {ConsoleUi.FormatDate(missing[0])}..{ConsoleUi.FormatDate(missing[^1])}");
+
+        if (!ConsoleUi.AskYesNo("Указать отпуск?", false)) return current;
+
+        while (true)
+        {
+            var input = ConsoleUi.AskOptional("Период отпуска (Enter — закончить)");
+            if (string.IsNullOrWhiteSpace(input)) break;
+
+            List<VacationPeriod> periods;
+            try
+            {
+                periods = VacationPeriod.ParseMany(input);
+            }
+            catch (VacationFormatException ex)
+            {
+                ConsoleUi.Error(ex.Message);
+                continue;
+            }
+
+            var inMonth = periods
+                .Where(p => p.To >= current.MonthStart && p.From <= current.Anchor)
+                .ToList();
+
+            if (inMonth.Count == 0)
+            {
+                ConsoleUi.Warn($"  В {current.Label} таких дней нет.");
+                continue;
+            }
+
+            var days = inMonth
+                .SelectMany(p => Enumerable.Range(0, p.Days).Select(i => p.From.AddDays(i)))
+                .Where(d => d >= current.MonthStart && d <= current.Anchor)
+                .ToList();
+
+            var workdays = days.Count(d => !config.Calendar.IsWeekend(d));
+            if (workdays == 0)
+            {
+                ConsoleUi.Warn("  Это только выходные — на норму они не влияют.");
+                continue;
+            }
+
+            var alreadyLogged = current.Days
+                .Where(d => days.Contains(d.Date) && d.Hours > 0)
+                .Sum(d => d.Hours);
+
+            var added = store.Add(inMonth);
+            try
+            {
+                store.Save();
+            }
+            catch (ConfigException ex)
+            {
+                ConsoleUi.Warn($"  {ex.Message}");
+                ConsoleUi.Muted("  Отпуск учтён только на этот запуск.");
+            }
+
+            config.ApplyVacations(store.Periods);
+            current = MonthReport.Build(month, today, config.HoursPerDay, entries, config.Calendar);
+
+            var label = string.Join(", ", inMonth.Select(p => p.ToDisplay()));
+            ConsoleUi.Success(added > 0
+                ? $"  Учтено: {label} (+{added} дн.)."
+                : $"  Учтено: {label} — этот отпуск уже был сохранён.");
+            if (alreadyLogged > 0)
+                ConsoleUi.Warn($"  За эти дни уже списано {ConsoleUi.Fmt(alreadyLogged)} ч — проверьте, нет ли задвоения.");
+
+            ConsoleUi.Info($"  Норма: {ConsoleUi.Fmt(current.NormByWeekdays)} ч, списано {ConsoleUi.Fmt(current.Logged)} ч, " +
+                           $"недостача {ConsoleUi.Fmt(Math.Max(current.GapByWeekdays, 0))} ч, незаполненных дней {current.MissingWorkdays.Count}.");
+        }
+
+        return current;
+    }
+
+    private static async Task<Issue> ResolveIssueAsync(        RedmineClient client,
         IReadOnlyList<Issue> candidates,
         CommandLine cli,
         bool interactive)
@@ -233,6 +378,42 @@ internal static class Program
             ConsoleUi.Warn("  Дата приходится на выходной.");
         else if (config.Calendar.IsHoliday(date))
             ConsoleUi.Warn("  Дата приходится на праздник.");
+        else if (config.Calendar.IsVacation(date))
+            ConsoleUi.Warn("  Дата приходится на отпуск: норма за этот день не начисляется.");
+    }
+
+    private static void PrintVacations(VacationStore store)
+    {
+        ConsoleUi.Title("Отпуск: дни вне нормы рабочего времени");
+
+        if (store.Periods.Count == 0)
+        {
+            ConsoleUi.Muted("  Отпуск не задан.");
+        }
+        else
+        {
+            foreach (var period in store.Periods)
+                ConsoleUi.Info($"  • {period.ToDisplay()} ({period.Days} календ. дн.)");
+        }
+
+        ConsoleUi.KeyValue("Файл", store.FilePath);
+
+        var envRaw = Environment.GetEnvironmentVariable(VacationStore.EnvVar);
+        if (!string.IsNullOrWhiteSpace(envRaw))
+        {
+            try
+            {
+                var extra = VacationPeriod.ParseMany(envRaw);
+                ConsoleUi.KeyValue("Из окружения", string.Join(", ", extra.Select(p => p.ToDisplay())));
+            }
+            catch (VacationFormatException ex)
+            {
+                ConsoleUi.Warn($"  {VacationStore.EnvVar}: {ex.Message}");
+            }
+        }
+
+        ConsoleUi.Muted("  Добавить: --vacation 02.11.2026..06.11.2026");
+        ConsoleUi.Muted("  Убрать всё: --vacation-clear");
     }
 
     private static async Task PrintAfterMathAsync(

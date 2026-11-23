@@ -1,4 +1,5 @@
 using System.Globalization;
+using RedmineTimeLogger.Domain;
 
 namespace RedmineTimeLogger.Cli;
 
@@ -29,7 +30,34 @@ public sealed class CommandLine
     public string? Month { get; private set; }
     public string? Holidays { get; private set; }
 
+    /// <summary>Периоды отпуска, добавленные в этом запуске (сохраняются в файл).</summary>
+    public List<string> Vacations { get; } = new();
+
+    public bool ShowVacations { get; private set; }
+    public bool ClearVacations { get; private set; }
+
     public bool HasIssue => !string.IsNullOrWhiteSpace(Issue);
+
+    /// <summary>Задан хотя бы один период отпуска.</summary>
+    public bool HasVacation => Vacations.Count > 0;
+
+    public List<VacationPeriod> ParseVacations()
+    {
+        var result = new List<VacationPeriod>();
+        foreach (var value in Vacations)
+        {
+            try
+            {
+                result.AddRange(VacationPeriod.ParseMany(value));
+            }
+            catch (VacationFormatException ex)
+            {
+                throw new CommandLineException($"--vacation: {ex.Message}");
+            }
+        }
+
+        return result;
+    }
 
     public static CommandLine Parse(string[] args)
     {
@@ -60,6 +88,9 @@ public sealed class CommandLine
                 case "--comment": result.Comment = Next("--comment"); break;
                 case "--month": result.Month = Next("--month"); break;
                 case "--holidays": result.Holidays = Next("--holidays"); break;
+                case "--vacation": result.Vacations.Add(Next("--vacation")); break;
+                case "--vacations": result.ShowVacations = true; break;
+                case "--vacation-clear" or "--vacations-clear": result.ClearVacations = true; break;
                 default:
                     throw new CommandLineException($"Неизвестный аргумент «{arg}». Справка: --help");
             }

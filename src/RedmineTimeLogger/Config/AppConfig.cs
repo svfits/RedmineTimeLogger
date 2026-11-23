@@ -23,17 +23,35 @@ public sealed class AppConfig
     public const string HolidaysEnvVar = "REDMINE_HOLIDAYS";
     public const string ActivityEnvVar = "REDMINE_DEFAULT_ACTIVITY";
     public const string InsecureEnvVar = "REDMINE_IGNORE_CERT_ERRORS";
+    public const string VacationsEnvVar = VacationStore.EnvVar;
 
     public required string BaseUrl { get; init; }
     public required string ApiKey { get; init; }
     /// <summary>Откуда взят ключ — для диагностики (сам ключ не печатается).</summary>
     public required string ApiKeySource { get; init; }
     public required decimal HoursPerDay { get; init; }
-    public required WorkCalendar Calendar { get; init; }
     public required string DefaultActivityName { get; init; }
     public bool IgnoreCertificateErrors { get; init; }
 
-    public static AppConfig Load(CommandLine cli)
+    /// <summary>Праздники: нужны, чтобы пересобрать календарь после добавления отпуска.</summary>
+    public required IReadOnlyList<DateOnly> Holidays { get; init; }
+
+    /// <summary>Отпуск из окружения и командной строки — дополняет сохранённый в файле.</summary>
+    public required IReadOnlyList<VacationPeriod> ExtraVacations { get; init; }
+
+    /// <summary>Действующие периоды отпуска (файл + переменная окружения + командная строка).</summary>
+    public IReadOnlyList<VacationPeriod> Vacations { get; private set; } = Array.Empty<VacationPeriod>();
+
+    public WorkCalendar Calendar { get; private set; } = null!;
+
+    /// <summary>Применяет сохранённые периоды отпуска (после того как пользователь их указал).</summary>
+    public void ApplyVacations(IReadOnlyList<VacationPeriod> saved)
+    {
+        Vacations = VacationStore.Combine(saved, ExtraVacations);
+        Calendar = new WorkCalendar(Holidays, Vacations);
+    }
+
+    public static AppConfig Load(CommandLine cli, VacationStore store)
     {
         var url = FirstNonEmpty(cli.Url, Environment.GetEnvironmentVariable("REDMINE_URL"), DefaultUrl)!;
         var (key, source) = ResolveApiKey();
@@ -46,20 +64,46 @@ public sealed class AppConfig
             if (parsed is > 0 and <= 24) hours = parsed;
         }
 
-        var holidays = BuildHolidays(cli.Holidays);
+        var holidays = BuildHolidays(cli.Holidays).ToList();
+        var extraVacations = BuildVacations(cli);
         var insecureRaw = Environment.GetEnvironmentVariable(InsecureEnvVar);
         var insecure = cli.Insecure || IsTruthy(insecureRaw);
 
-        return new AppConfig
+        var config = new AppConfig
         {
             BaseUrl = url,
             ApiKey = key,
             ApiKeySource = source,
             HoursPerDay = hours,
-            Calendar = new WorkCalendar(holidays),
             DefaultActivityName = FirstNonEmpty(Environment.GetEnvironmentVariable(ActivityEnvVar), "Разработка")!,
             IgnoreCertificateErrors = insecure,
+            Holidays = holidays,
+            ExtraVacations = extraVacations,
         };
+
+        config.ApplyVacations(store.Periods);
+        return config;
+    }
+
+    private static List<VacationPeriod> BuildVacations(CommandLine cli)
+    {
+        var extra = new List<VacationPeriod>();
+
+        var envRaw = Environment.GetEnvironmentVariable(VacationsEnvVar);
+        if (!string.IsNullOrWhiteSpace(envRaw))
+        {
+            try
+            {
+                extra.AddRange(VacationPeriod.ParseMany(envRaw));
+            }
+            catch (VacationFormatException ex)
+            {
+                throw new ConfigException($"{VacationsEnvVar}: {ex.Message}");
+            }
+        }
+
+        extra.AddRange(cli.ParseVacations());
+        return VacationStore.Merge(extra);
     }
 
     private static (string Key, string Source) ResolveApiKey()

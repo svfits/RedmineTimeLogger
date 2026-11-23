@@ -25,6 +25,10 @@ public static class Help
               --comment <текст>    комментарий к записи
               --month <ГГГГ-ММ>    месяц для отчёта; по умолчанию текущий
               --holidays <даты>    дополнительные нерабочие дни через запятую (ГГГГ-ММ-ДД)
+              --vacation <период>  добавить отпуск и сохранить: 02.11.2026..06.11.2026
+                                   (одна дата — один день; несколько — через запятую)
+              --vacations          показать сохранённый отпуск
+              --vacation-clear     очистить сохранённый отпуск
               --url <адрес>        адрес Redmine; по умолчанию https://rm.burworld.ru
               --report             только отчёт по месяцу, без списания
               --check              проверить подключение и ключ
@@ -42,12 +46,23 @@ public static class Help
               REDMINE_URL               адрес Redmine
               REDMINE_HOURS_PER_DAY     норма часов в день (по умолчанию 8)
               REDMINE_HOLIDAYS          дополнительные нерабочие дни
+              REDMINE_VACATIONS         отпуск разово, не сохраняется: 02.11.2026..06.11.2026
+              REDMINE_VACATIONS_FILE    путь к файлу отпусков
               REDMINE_DEFAULT_ACTIVITY  вид работ по умолчанию
               REDMINE_IGNORE_CERT_ERRORS=1  не проверять TLS-сертификат
+
+            Отпуск — дни, которые не входят в норму рабочего времени: за них
+            не начисляются часы, они не попадают в «незаполненные дни» и не
+            предлагаются как дата списания. В интерактивном режиме программа
+            сама спрашивает про отпуск, если незаполненных рабочих дней больше
+            трёх. Периоды сохраняются в %APPDATA%\RedmineTimeLogger\vacations.json
+            и задаются вручную параметром --vacation.
 
             Примеры:
               RedmineTimeLogger
               RedmineTimeLogger --report
+              RedmineTimeLogger --vacation 02.11.2026..06.11.2026
+              RedmineTimeLogger --vacations
               RedmineTimeLogger --issue 26422 --hours 8 --date 2026-11-19 --dry-run
               RedmineTimeLogger --issue 26422 --hours 8 --date 2026-11-19 -y --comment "MR !66"
             """);

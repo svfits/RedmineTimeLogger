@@ -2,14 +2,14 @@ using RedmineTimeLogger.Redmine;
 
 namespace RedmineTimeLogger.Domain;
 
-public sealed record DayLine(DateOnly Date, decimal Hours, bool IsWeekend, bool IsHoliday)
+public sealed record DayLine(DateOnly Date, decimal Hours, bool IsWeekend, bool IsHoliday, bool IsVacation)
 {
-    public bool IsWorkday => !IsWeekend && !IsHoliday;
+    public bool IsWorkday => !IsWeekend && !IsHoliday && !IsVacation;
 }
 
 /// <summary>
-/// Итоги месяца: норма (будни × часов в день), списано, недостача,
-/// незаполненные рабочие дни.
+/// Итоги месяца: норма (будни × часов в день за вычетом отпуска и праздников),
+/// списано, недостача, незаполненные рабочие дни.
 /// </summary>
 public sealed class MonthReport
 {
@@ -27,15 +27,22 @@ public sealed class MonthReport
 
     public decimal Logged => Entries.Sum(e => e.Hours);
 
-    /// <summary>Все будни месяца до опорной даты включительно.</summary>
+    /// <summary>Все будни месяца до опорной даты включительно (включая отпуск).</summary>
     public int WeekdayCount => Days.Count(d => !d.IsWeekend);
 
-    /// <summary>Будни за вычетом праздников.</summary>
+    /// <summary>Будни, попавшие в отпуск: за них норма не начисляется.</summary>
+    public int VacationDayCount => Days.Count(d => !d.IsWeekend && d.IsVacation);
+
+    /// <summary>Будни без отпуска — база нормы «только будни».</summary>
+    public int NormWeekdayCount => WeekdayCount - VacationDayCount;
+
+    /// <summary>Рабочие дни: будни минус праздники и отпуск.</summary>
     public int WorkdayCount => Days.Count(d => d.IsWorkday);
 
-    public int HolidayCountOnWeekdays => Days.Count(d => d.IsHoliday && !d.IsWeekend);
+    /// <summary>Праздники в будни, не попавшие в отпуск (иначе они уже не в норме).</summary>
+    public int HolidayCountOnWeekdays => Days.Count(d => d.IsHoliday && !d.IsWeekend && !d.IsVacation);
 
-    public decimal NormByWeekdays => WeekdayCount * HoursPerDay;
+    public decimal NormByWeekdays => NormWeekdayCount * HoursPerDay;
 
     public decimal NormByHolidays => WorkdayCount * HoursPerDay;
 
@@ -50,6 +57,9 @@ public sealed class MonthReport
 
     /// <summary>Последний незаполненный рабочий день — предлагается как дата списания по умолчанию.</summary>
     public DateOnly? LastMissingWorkday => MissingWorkdays.Count == 0 ? null : MissingWorkdays[^1];
+
+    /// <summary>Непрерывные отрезки отпуска, попавшие в отчётный период.</summary>
+    public IReadOnlyList<(DateOnly From, DateOnly To)> VacationRuns => BuildRuns();
 
     public string Label => $"{MonthNames[MonthStart.Month - 1]} {MonthStart.Year}";
 
@@ -70,7 +80,12 @@ public sealed class MonthReport
         var days = new List<DayLine>();
         for (var date = monthStart; date <= anchor; date = date.AddDays(1))
         {
-            days.Add(new DayLine(date, byDay.GetValueOrDefault(date), calendar.IsWeekend(date), calendar.IsHoliday(date)));
+            days.Add(new DayLine(
+                date,
+                byDay.GetValueOrDefault(date),
+                calendar.IsWeekend(date),
+                calendar.IsHoliday(date),
+                calendar.IsVacation(date)));
         }
 
         return new MonthReport
@@ -81,5 +96,29 @@ public sealed class MonthReport
             Days = days,
             Entries = entries.OrderBy(e => e.SpentOn).ToList(),
         };
+    }
+
+    private List<(DateOnly From, DateOnly To)> BuildRuns()
+    {
+        var runs = new List<(DateOnly From, DateOnly To)>();
+        DateOnly? from = null;
+        DateOnly? to = null;
+
+        foreach (var day in Days)
+        {
+            if (!day.IsVacation)
+            {
+                if (from is not null && to is not null) runs.Add((from.Value, to.Value));
+                from = null;
+                to = null;
+                continue;
+            }
+
+            from ??= day.Date;
+            to = day.Date;
+        }
+
+        if (from is not null && to is not null) runs.Add((from.Value, to.Value));
+        return runs;
     }
 }
